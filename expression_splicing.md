@@ -1,6 +1,6 @@
 # Expression Splicing in C\# #
 
-A couple of years ago, I was working on C# project where we needed to manipulate C# expression trees at runtime. It's hard to do this by hand, but having played around with quasiquotes in Scala, I was inspired and wrote a tiny library to make this easier in C#. Recently, [a Reddit user was describing a similar need](https://www.reddit.com/r/AskProgramming/comments/8di1tw/does_anyone_like_programmatically_manipulating_c/), so I promised to dust off my code and write a blog post.
+A couple of years ago, I was working on a C# project where we needed to manipulate C# expression trees at runtime. It's hard to do this by hand, but having played around with quasiquotes in Scala, I was inspired and wrote a tiny library to make this easier in C#. Recently, [a Reddit user was describing a similar need](https://www.reddit.com/r/AskProgramming/comments/8di1tw/does_anyone_like_programmatically_manipulating_c/), so I promised to dust off my code and write a blog post.
 
 Though the Reddit user already knows what they're doing, to write this for a broader audience, I'll explain things from the beginning. Even if you have no idea what I'm talking about so far, you should be able to follow along.
 
@@ -21,9 +21,9 @@ These look almost identical, so you might expect that they do the same thing. An
     IEnumerable<int> q_as_e = q;
     var result3 = q_as_e.Where(x => x < 10).ToList();
 
-That's a perfectly reasonable assumption to make... but it's also wrong. This query (probably) produces the same results, but depending on the particular `IQueryable`, it will do so in a very different way. For example, if `q` came from Entity Framework, then `result2` will be produced by generating an appropriate SQL query to filter the data on the database. On the other hand, `result3` will be produced by fetching all the data from the datbase table and filtering it in the C# application. 
+Unfortunately, that's not quite the case. This query will (probably) produce the same results, but depending on the particular `IQueryable`, it may do so in a very different way. For example, if `q` came from Entity Framework, then `result2` will be produced by generating an appropriate SQL query to filter the data on the database. On the other hand, `result3` will be produced by fetching all the data from the database table and filtering it in the C# application. 
 
-It turns out that all the Linq methods, like `Where` and `Select`, are implemented as extension methods. When the extension method is called on an `IQueryable<T>`, the extension method lives on [a class called `Queryable`](https://docs.microsoft.com/en-us/dotnet/api/system.linq.queryable?view=netstandard-2.0); when called on an `IEnumerable<T>`, the extension method lives on [a class called `Enumerable`](https://docs.microsoft.com/en-us/dotnet/api/system.linq.enumerable?view=netstandard-2.0). The C# compiler will prefer to use the more specific extension method - if it knows that an expression is `IQueryable<T>`, it will prefer to use the `Queryable` extension methods over the `Enumerable` extension method.
+It turns out that all the Linq methods, like `Where` and `Select`, are implemented as extension methods. When the extension method is called on an `IQueryable<T>`, the extension method lives on [a class called `Queryable`](https://docs.microsoft.com/en-us/dotnet/api/system.linq.queryable?view=netstandard-2.0); when called on an `IEnumerable<T>`, the extension method lives on [a class called `Enumerable`](https://docs.microsoft.com/en-us/dotnet/api/system.linq.enumerable?view=netstandard-2.0). The C# compiler will prefer to use the more specific extension method - if it knows that an expression is `IQueryable<T>`, it will prefer to use the `Queryable` extension methods over the analogous `Enumerable` extension method.
 
 If you compare the signatures for `Where` in these two classes, you will quickly spot the differences:
 
@@ -67,11 +67,11 @@ When the compiler needs to convert a lambda literal into an `Expression<TDelegat
             ),
             p1);
 
-So just to be clear, `e1` doesn't point to anything that's directly runnable - it's not pointing to a delegate. The `x => x > 10` lambda in fact has no compiled peer delegate in the generated assembly. `e1` instead points to a data structure that *describes* the lambda literal that existed in the source code.
+So just to be clear, `e1` doesn't point to anything that's directly runnable - it's not pointing to a delegate. The `x => x > 10` lambda in fact has no compiled peer delegate in the generated assembly. `e1` instead points to a runtime data structure that *describes* the lambda literal that existed in the source code.
 
 That also explains how Entity Framework is able to do what it does. Because it operates on instances of `IQueryable<T>`, all the Linq methods accept expression trees. The `Queryable` extension methods cooperate with the specific `IQueryable` instance to build up a representation of what Linq methods the user invoked, and the `IQueryable`'s `GetEnumerator` method ultimately interprets those expression trees. In the case of Entity Framework, that method will ultimately generate a SQL query and get results from the database.
 
-One more detail: the library defines a base class `Expression` with a whole host of subclasses, including one called `LambdaExpression`. And `LambdaExpression` has a subclass called `Expression<TDelegate>`. This is somewhat misleading. `Expression<TDelegate>` represents a lambda literal of the given `TDelegate` type, and it is the only way to invoke the expression tree machinery in the compiler. That is to say, while this is valid:
+One more detail: the library defines a base class `Expression` with a whole host of subclasses, including one called `LambdaExpression`. And `LambdaExpression` has a subclass called `Expression<TDelegate>`. `Expression<TDelegate>` is handled specially by the compiler. It represents a lambda literal of the given `TDelegate` type, and it is the only way to compel the compiler to generate code to the expression tree at runtime. That is to say, while this is valid:
 
     Expression<Func<int, bool>> e1 = x => x > 10;  // OK
 
@@ -79,13 +79,13 @@ This is not:
 
     LambdaExpression e2 = (int x) => x > 10;       // error
 
-The second version doesn't invoke the expression-rewriting functionality of the compiler.
+The second version doesn't invoke the expression tree functionality of the compiler.
 
 In general, while every `Expression` node represents the root of *some* expression tree, every expression tree that is built by the compiler will be rooted by an instance of `Expression<...>`. 
 
 ## Splicing ##
 
-The Reddit user in question was looking for a solution to translate this:
+The Reddit user was looking for a solution to translate this:
 
     x => x.IntProperty
 
@@ -102,9 +102,9 @@ If we could write this in C#-like syntax, it might look something like this. I'm
     Expression<Func<T,int>>   substitutionExpr  =  y => y.IntProperty;
     Expression<Func<T, bool>> resultExpr        =  x => intermediateResults.Contains( ${substitutionExpr(x)} );
 
-That is, the resulting expression is an ordinary expression with embedded references to other `Expression<TDelegate>` instances. As the expression tree is being built, we would like the embedded expressions to be expanded and inlined. In other words, `${substitutionExpr(x)}` should turn into `x.IntProperty`. Therefore, `resultExpr` should be equivalent to `intermediateResults.Contains(x.IntProperty)`, as the Redditor wanted.
+That is, the resulting expression is an ordinary expression with embedded references to other `Expression<TDelegate>` instances. As the expression tree is being built, we would like the embedded expressions to be expanded and inlined. In other words, `${substitutionExpr(x)}` should turn into `x.IntProperty`. Therefore, `resultExpr` should be equivalent to `intermediateResults.Contains(x.IntProperty)`.
 
-I don't know the details of what this particular developer needed, but in our case, we wanted the ability to provide different expressions for `substitutionExpr`. So we wanted something that could work like this:
+Furthermore, we'd prefer to not need both expression literals to be defined in the same place. We'd like to something that could work like this:
 
     Expression<Func<T, bool>> MakeContainsExpression<T>(
         IQueryable<int> intermediateResults, 
@@ -113,7 +113,7 @@ I don't know the details of what this particular developer needed, but in our ca
         return x => intermediateResults.Contains( ${ substitutionExpr(x) } );
     }
 
-I call this operation "expression splicing" (named after [rope splicing](https://en.wikipedia.org/wiki/Rope_splicing)) since we're taking two expressions, modifying them so that they're compatible with each other, then joining them weaving them together.
+I call this operation "expression splicing" (named after [rope splicing](https://en.wikipedia.org/wiki/Rope_splicing)) since we're taking two expressions, modifying them so that they're compatible with each other, then weaving them together.
 
 ## Problem ##
 
@@ -123,9 +123,10 @@ Fortunately, since expression trees are just runtime data structures, we can do 
 
 After thinking about the problem for a while, I had an insight: if we define bogus methods that nobody would ever have reason to legitimately call, we can embed calls to those bogus methods in our template expression to act as placeholders. So we can define a method with this signature:
 
-    public static TResult Inline<T1, TResult>(this Expression<Func<T1, TResult>> expression, T1 value1)
+    public static TResult Inline<T1, TResult>(this Expression<Func<T1, TResult>> substitutionExpr, T1 value1)
     {
-        throw new InvalidOperationException("This method isn't meant to be called directly; it's meant to appear inside an expression passed to Splice");
+        throw new Exception(
+            "This method isn't meant to be called; it's meant to appear inside a template expression passed to Splice");
     }
 
 And then we can use it in the template expression that we pass to `Splice`:
@@ -164,9 +165,9 @@ We need to first transform the body of `expr`, replacing embedded parameter refe
 To reiterate, this means that we're going to rewrite both the template expression as well as the substitution expressions. 
 
 1. We'll rewrite the template expression to eliminate calls to `Inline`
-2. For every time that a substitution expression is inlines, we need to replace references to its own parameters with references to the `Inline` arguments.
+2. For every time that a substitution expression is inlined, we need to replace references to its own parameters with references to the `Inline` arguments.
 
-The .NET Framework provides a convenient mechanism to rewrite expression trees in the form of the class `ExpressionVisitor`. The default behavior of its `Visit` method is to generate an exact duplicate of the input expression tree, but subclasses can override its various `VisitX` methods to do something different.
+The .NET Framework provides a convenient mechanism to rewrite expression trees in the form of the class [`ExpressionVisitor`](https://docs.microsoft.com/en-us/dotnet/api/system.linq.expressions.expressionvisitor?view=netstandard-2.0). The default behavior of its `Visit` method is to generate an exact duplicate of the input expression tree, but subclasses can override its various `VisitX` methods to do something different.
 
 So let's briefly skip to the simpler replacement that we need to do: replacing parameter references in substitution expressions. We can define a simple subclass of `ExpressionVisitor` that will do this:
 
@@ -194,12 +195,10 @@ You can call it like this:
 
     Expression<Func<int, int>> doubleExpr = x => x * 2;
     
-    var substitutions = new Dictionary<ParameterExpression, Expression>
-    {
-        [doubleExpr.Parameters[0]] = Expression.Add(
+    var substitutions = new Dictionary<ParameterExpression, Expression>();
+    substitutions[doubleExpr.Parameters[0]] = Expression.Add(
             Expression.Constant(3),
-            Expression.Constant(4))
-    };
+            Expression.Constant(4));
 
     var rewritten = new ParameterReplacer(substitutions).Visit(doubleExpr.Body);
 
@@ -211,20 +210,25 @@ Note that we're not passing `doubleExpr` (a `LambdaExpression`) itself to the `V
 
 Armed with that, we can now write the code to do replacement in the template lambda:
 
-    private class SpliceRewriter : ExpressionVisitor
+    class SpliceRewriter : ExpressionVisitor
     {
         protected override Expression VisitMethodCall(MethodCallExpression node)
         {
             if (node.Method.DeclaringType == typeof(ExpressionSplicer) && node.Method.Name == "Inline")
             {
-                LambdaExpression templateToInsert =
+                // `node.Arguments[0]` (i.e. the `this` parameter to `Inline` will be the substitution expression
+                // and the remainder of `node.Arguments` will be the arguments we want to provide to that
+                // substitution expression.
+                LambdaExpression expressionToInsert =
                     Expression.Lambda<Func<LambdaExpression>>(node.Arguments[0]).Compile()();
 
-                Dictionary<ParameterExpression, Expression> substitutions = templateToInsert.Parameters
-                    .Zip(node.Arguments.Skip(1), Tuple.Create)
-                    .ToDictionary(x => x.Item1, x => x.Item2);
+                var substitutionArguments = node.Arguments.Skip(1);
+                var parameterArgumentPairs = expressionToInsert.Parameters
+                    .Zip(substitutionArguments, (parameter, argument) => new { parameter, argument });
+                var substitutions = parameterArgumentPairs.ToDictionary(x => x.parameter, x => x.argument);
+
                 var parameterReplacer = new ParameterReplacer(substitutions);
-                return parameterReplacer.Visit(templateToInsert.Body);
+                return parameterReplacer.Visit(expressionToInsert.Body);
             }
 
             return base.VisitMethodCall(node);
@@ -233,9 +237,9 @@ Armed with that, we can now write the code to do replacement in the template lam
 
 You can see that this visitor only handles calls to `Inline` methods specially. Other calls are not rewritten.
 
-One thing that might be suspicious is the line that calls `LambdaExpression.Compile` (and then immediately invokes the resulting delegate). You might be wondering why that's being done and about the runtime cost of calling that method. 
+One thing that might seem suspicious is the line that calls `LambdaExpression.Compile` (and then immediately invokes the resulting delegate). You might be wondering why that's being done and about the runtime cost of calling that method. 
 
-To answer the first question, it's important to think about the value that we'll find in `node.Arguments[0]`. You might expect it to be an instance of `LambdaExpression`, but that's not necessarily the case. More likely, it's some other kind of `Expression` node that represents some chunk of code that can produce an `LambdaExpression`. In the `MakeContainsExpression` example above, in fact, that will actually be a `FieldExpression`, which is an internal subclass of `MemberExpression`. (If this seems odd, it's due to the way that the C# compiler represents closed-over variables in lambdas - captured variables are transformed into fields on some generated class.)
+To answer the first question, it's important to think about the value that we'll find in `node.Arguments[0]`. You might expect it to be an instance of `LambdaExpression`, but that's not necessarily the case. More likely, it's some other kind of `Expression` node that represents some chunk of code that can produce a `LambdaExpression`. In the `MakeContainsExpression` example above, in fact, that will actually be a `FieldExpression`, which is an internal subclass of `MemberExpression`. (If this seems odd, it's due to the way that the C# compiler represents closed-over variables in lambdas - captured variables are transformed into fields on some generated class.)
 
 In a case like this, compiling the expression node into a parameterless lambda is the most direct way to get its value (though see the "Future Work" section, below).
 
@@ -245,19 +249,58 @@ To answer the second question, I'd mention that this pattern of dynamically comp
 
 When `ToList` is called, it will turn around and call `GetEnumerator` on an instance of `EnumerableQuery`, and that will assemble a `LambdaExpression`, compile it, and execute the resulting delegate.
 
+With both expression rewriting visitors written, I can now show you the `Splice` implementation itself:
+
+    public static Expression<Func<T1, TResult>> Splice<T1, TResult>(
+        Expression<Func<T1, TResult>> templateExpr)
+    {
+        return new SpliceRewriter().VisitAndConvert(templateExpr, "Splice");
+    }
+
 That's it! That's the core implementation of expression splicing. My implementation is just about 100 lines sans comments, and a good chunk of that is boilerplate (such as defining multiple variants of `Inline` and `Splice`).
+
+---
+
+The example `MakeContainsExpression` above already showed how you would use it, but let me show you another example. It can be useful to construct expression trees that include a bunch of subexpressions that are all combined with `&&`. When we know the expressions up front, that's easy - you can just create the expression tree directly:
+
+    Expression<Func<int, bool>> = x => x > 0 && x < 10;
+
+When the expressions aren't known up-front, but the structure is known, you can use the expression splicer to generate an expression:
+
+    static Expression<Func<T, bool>> And2<T>(
+        Expression<Func<T, bool>> left, 
+        Expression<Func<T, bool>> right)
+    {
+        return Splice((T x) => left.Inline(x) && right.Inline(x));
+    }
+
+But what if we we're not even sure up front how many expressions we need? Maybe we want to combine two expressions, or maybe we want to combine five. We could make multiple overloads of `And` that take different numbers of parameters. Or, since this is all just runtime data structure manipulation, we can use our ordinary data structure manipulation tools:
+
+    static Expression<Func<T, bool>> And<T>(params Expression<Func<T, bool>>[] exprs)
+    {
+        if (exprs.Length == 0)
+        {
+            return x => true;
+        }
+
+        return exprs.Aggregate(And2);
+    }
+
+Given that we've already written a function that can combine two arbitrary expressions with `&&`, it's easy to write a function that can combine an arbitrary number of expressions. And since `&&` is left-associative, `Aggregate` is a good match. (If we wanted to handle a right-associative construct, we'd need to do it by hand - `Aggregate` walks the collection from left-to-right, and as far as I know, there's no right-biased version of this operation in Linq.)
 
 ## Future Work ##
 
+This is pretty close to the implementation that we're using in production. To the best of my knowledge, it's been working well for several years. But of course there are always ways that it could be improved. 
+
 Shown here was just one variant of `Splice` (which takes one parameter) and just one variant of `Inline` (which also takes just one parameter). It's possible to define variants of `Splice` which take 0 or more parameters, and it's possible to define variants of `Inline` which do the same. You would want higher-arity `Inline` methods when you want to support substitution expressions that take more parameters, and you'd want higher-arity `Splice` methods when you want to support template expressions that take more parameters. 
 
-When dealing with nested Linq queries, it's sometimes desirable not to inline the substitution expression into the template, but rather to merely reference it - for example, when calling one of the extension methods on `Queryable`, which expect `Expression<Func<...>>`. But as it turns out, it's sometimes necessary to call extension methods on `Enumerable` (such as `Select`), and those expect `Func<...>`. Now, since we have an `Expression<Func<...>>` in hand, we *ought* to be able to pass it as the argument to `Select`, since an `Expression<Func<...>>` represents a lambda literal and lambda literals are generally usable as delegates. But we'd need to do some massaging of the `Expression` to make that work, and that massaging represents a different kind of substitution (in our case, we called that operation `Unwrap`, though I'm not totally sold on that name).
+When dealing with nested Linq queries, it's sometimes desirable not to inline the substitution expression into the template, but rather to merely reference it - for example, when calling one of the extension methods on `Queryable`, which expect `Expression<Func<...>>`. But as it turns out, inside a lambda, it's sometimes necessary to call extension methods on `Enumerable` (such as `Select`), and those expect `Func<...>`. Now, since we have an `Expression<Func<...>>` in hand, we *ought* to be able to pass it as the argument to `Select`, since an `Expression<Func<...>>` represents a lambda literal and lambda literals are generally usable as delegates. But we'd need to do some massaging of the `Expression` to make that work, and that massaging represents a different kind of substitution (in our case, we called that operation `Unwrap`, though I'm not totally sold on that name).
 
-The expression splicer currently looks very specifically for methods called `Inline` that are defined directly in the `ExpressionSplicer` class. That works fine, but it's not very extensible - if you don't define enough variants of `Inline` up front, the user of the library can't cope. It would be possible to use a custom attribute to indicate which methods are placeholder markers, allowing a user to add support for arities beyond those shipped in the library.
+The expression splicer currently looks very specifically for methods called `Inline` that are defined directly in the `ExpressionSplicer` class. That works fine as long as the person writing `ExpressionSplicer` defined enough variants up front. If the user of `ExpressionSplicer` needs a variant that wasn't part of the original library, they're out of luck. It would be possible to use a custom attribute to indicate which methods are placeholder markers, allowing a user to add support for arities beyond those shipped in the library.
 
-Similarly, this implementation handles just one kind of expression substituting. Other kinds are useful in practice, like the aforementioned `Unwrap` substitution. The same custom attribute could also refer to an implementation method to do the actual substitution, similar to how NUnit allows attributes to point to methods and properties that can be used as `TestCaseSource`s.
+Similarly, this implementation handles just one kind of expression substituting. Other kinds are useful in practice, like the aforementioned `Unwrap` substitution. The same custom attribute could also refer to an implementation method to do the actual substitution, similar to how NUnit uses `TestCaseSource` to point to methods and properties that produce test data.
 
-As mentioned above, though the framework uses `LambdaExpression.Compile` already, there may be some concerns about the runtime cost of invoking the compiler just to extract some constant data from the expression tree. It would be possible to replace the dynamic compilation with a function that walks the expression tree by hand, though that function would need to deal with all the possible expression tree structures that would arise in the wild.
+As mentioned above, though the framework uses `LambdaExpression.Compile` already, there may be some concerns about the runtime cost of invoking the compiler just to extract some constant data from the expression tree. It would be possible to replace the dynamic compilation with a function that walks the expression tree directly, though that function would need to deal with all the possible expression tree structures that would arise in the wild.
 
 To take that even further, expression trees have an additional runtime cost. At runtime, a new copy of the expression tree is generated every time the expression tree is needed. So given the following code:
 
@@ -273,3 +316,5 @@ Then the same expression tree will be built, from scratch, every time `DoSomethi
 Even if we were to generate the template expression tree just once, we still need to walk it every time we call `Splice` to find the occurrences of `Inline`. Part of the template pre-processing could find and remember where these placeholders occur. In fact, it could also extract subexpressions from the template expression that do not participate in substitution; these subexpressions could be cached and re-used directly. 
 
 Taking that to its logical conclusion, it would be possible to, at runtime, analyze a template expression tree and generate a delegate which would perform the substitution described by the template. In other words, the C# compiler would emit code to generate the template expression, and we would run that code once. But we would then analyze that resulting expression tree to generate a new delegate at runtime. Our delegate's instructions would closely resemble the instructions in the compiler-generated code (the instructions that produced the original expression tree), except that it would also perform expression substitution as it builds the spliced expression.
+
+Perhaps the best future improvement, though, would be to completely eliminate the need to do any of this at runtime. In the same way that the C# compiler now handles string interpolation, it would be neat to see a concrete C# syntax to splice expression trees together (like the fantasy `${ ... }` syntax above). But I don't honestly expect that to happen. The C# language team only has so many hours in the day, and adding yet another special syntax would only serve to make the language more complex. And while string interpolation is useful to everybody, expression splicing is a niche need at best. Still, that's not so bad. That we were able to build something ourselves just highlights how powerful and flexible the existing mechanism is. 
